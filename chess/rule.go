@@ -11,13 +11,12 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
-
-	"math/rand"
 )
 
 //RC4Struct RC4密码流生成器
@@ -135,10 +134,13 @@ type PositionStruct struct {
 	zobr        *ZobristStruct        //走子方zobrist校验码
 	zobrist     *Zobrist              //所有棋子zobrist校验码
 	search      *Search
+	g           *Game
 }
 
 //NewPositionStruct 初始化棋局
-func NewPositionStruct() *PositionStruct {
+//g可以为nil，此时没父节点
+func NewPositionStruct(g *Game) *PositionStruct {
+	//这里已经进行了初始化，一定不会是nil了，下面不要对他进行nil的多此一举的判断
 	p := &PositionStruct{
 		zobr: &ZobristStruct{
 			dwKey:   0,
@@ -153,10 +155,12 @@ func NewPositionStruct() *PositionStruct {
 			},
 		},
 		search: &Search{},
+		g:      g, //保存父节点的指针
 	}
-	if p == nil {
-		return nil
-	}
+	//根本不可能为nil
+	//if p == nil {
+	//	return nil
+	//}
 
 	for i := 0; i < MaxMoves; i++ {
 		tmpMoveStruct := &MoveStruct{}
@@ -234,7 +238,7 @@ func (p *PositionStruct) clearBoard() {
 
 //setIrrev 清空(初始化)历史走法信息
 func (p *PositionStruct) setIrrev() {
-	p.mvsList[0].set(0, 0, p.checked(), p.zobr.dwKey)
+	p.mvsList[0].set(0, 0, p.isJiangJun(), p.zobr.dwKey)
 	p.nMoveNum = 1
 }
 
@@ -242,6 +246,7 @@ func (p *PositionStruct) setIrrev() {
 func (p *PositionStruct) startup() {
 	p.clearBoard()
 	pc := 0
+	//循环添加棋子进去棋谱上面
 	for sq := 0; sq < 256; sq++ {
 		pc = cucpcStartup[sq]
 		if pc != 0 {
@@ -292,8 +297,8 @@ func (p *PositionStruct) evaluate() int {
 	return p.vlBlack - p.vlRed + AdvancedValue
 }
 
-//inCheck 是否被将军
-func (p *PositionStruct) inCheck() bool {
+//inJiangJun 是否被将军
+func (p *PositionStruct) inJiangJun() bool {
 	return p.mvsList[p.nMoveNum-1].ucbCheck
 }
 
@@ -332,14 +337,15 @@ func (p *PositionStruct) undoMovePiece(mv, pcCaptured int) {
 func (p *PositionStruct) makeMove(mv int) bool {
 	dwKey := p.zobr.dwKey
 	pcCaptured := p.movePiece(mv)
-	if p.checked() {
+	if p.isJiangJun() {
 		p.undoMovePiece(mv, pcCaptured)
 		return false
 	}
 	p.changeSide()
-	p.mvsList[p.nMoveNum].set(mv, pcCaptured, p.checked(), dwKey)
+	p.mvsList[p.nMoveNum].set(mv, pcCaptured, p.isJiangJun(), dwKey)
 	p.nMoveNum++
 	p.nDistance++
+
 	return true
 }
 
@@ -375,8 +381,8 @@ func (p *PositionStruct) nullOkay() bool {
 	return p.vlBlack > NullMargin
 }
 
-//generateMoves 生成所有走法，如果bCapture为true则只生成吃子走法
-func (p *PositionStruct) generateMoves(mvs []int, bCapture bool) int {
+//generateMoves 生成所有走法，如果isCapture为true则只生成吃子走法
+func (p *PositionStruct) generateMoves(mvs []int, isCapture bool) int {
 	nGenMoves, pcSrc, sqDst, pcDst, nDelta := 0, 0, 0, 0, 0
 	pcSelfSide := sideTag(p.sdPlayer)
 	pcOppSide := oppSideTag(p.sdPlayer)
@@ -401,7 +407,7 @@ func (p *PositionStruct) generateMoves(mvs []int, bCapture bool) int {
 					continue
 				}
 				pcDst = p.ucpcSquares[sqDst]
-				if (bCapture && (pcDst&pcOppSide) != 0) || (!bCapture && (pcDst&pcSelfSide) == 0) {
+				if (isCapture && (pcDst&pcOppSide) != 0) || (!isCapture && (pcDst&pcSelfSide) == 0) {
 					mvs[nGenMoves] = move(sqSrc, sqDst)
 					nGenMoves++
 				}
@@ -414,7 +420,7 @@ func (p *PositionStruct) generateMoves(mvs []int, bCapture bool) int {
 					continue
 				}
 				pcDst = p.ucpcSquares[sqDst]
-				if (bCapture && (pcDst&pcOppSide) != 0) || (!bCapture && (pcDst&pcSelfSide) == 0) {
+				if (isCapture && (pcDst&pcOppSide) != 0) || (!isCapture && (pcDst&pcSelfSide) == 0) {
 					mvs[nGenMoves] = move(sqSrc, sqDst)
 					nGenMoves++
 				}
@@ -428,7 +434,7 @@ func (p *PositionStruct) generateMoves(mvs []int, bCapture bool) int {
 				}
 				sqDst += ccShiDelta[i]
 				pcDst = p.ucpcSquares[sqDst]
-				if (bCapture && (pcDst&pcOppSide) != 0) || (!bCapture && (pcDst&pcSelfSide) == 0) {
+				if (isCapture && (pcDst&pcOppSide) != 0) || (!isCapture && (pcDst&pcSelfSide) == 0) {
 					mvs[nGenMoves] = move(sqSrc, sqDst)
 					nGenMoves++
 				}
@@ -446,7 +452,7 @@ func (p *PositionStruct) generateMoves(mvs []int, bCapture bool) int {
 						continue
 					}
 					pcDst = p.ucpcSquares[sqDst]
-					if (bCapture && (pcDst&pcOppSide) != 0) || (!bCapture && (pcDst&pcSelfSide) == 0) {
+					if (isCapture && (pcDst&pcOppSide) != 0) || (!isCapture && (pcDst&pcSelfSide) == 0) {
 						mvs[nGenMoves] = move(sqSrc, sqDst)
 						nGenMoves++
 					}
@@ -460,7 +466,7 @@ func (p *PositionStruct) generateMoves(mvs []int, bCapture bool) int {
 				for inBoard(sqDst) {
 					pcDst = p.ucpcSquares[sqDst]
 					if pcDst == 0 {
-						if !bCapture {
+						if !isCapture {
 							mvs[nGenMoves] = move(sqSrc, sqDst)
 							nGenMoves++
 						}
@@ -483,7 +489,7 @@ func (p *PositionStruct) generateMoves(mvs []int, bCapture bool) int {
 				for inBoard(sqDst) {
 					pcDst = p.ucpcSquares[sqDst]
 					if pcDst == 0 {
-						if !bCapture {
+						if !isCapture {
 							mvs[nGenMoves] = move(sqSrc, sqDst)
 							nGenMoves++
 						}
@@ -510,7 +516,7 @@ func (p *PositionStruct) generateMoves(mvs []int, bCapture bool) int {
 			sqDst = squareForward(sqSrc, p.sdPlayer)
 			if inBoard(sqDst) {
 				pcDst = p.ucpcSquares[sqDst]
-				if (bCapture && (pcDst&pcOppSide) != 0) || (!bCapture && (pcDst&pcSelfSide) == 0) {
+				if (isCapture && (pcDst&pcOppSide) != 0) || (!isCapture && (pcDst&pcSelfSide) == 0) {
 					mvs[nGenMoves] = move(sqSrc, sqDst)
 					nGenMoves++
 				}
@@ -520,7 +526,7 @@ func (p *PositionStruct) generateMoves(mvs []int, bCapture bool) int {
 					sqDst = sqSrc + nDelta
 					if inBoard(sqDst) {
 						pcDst = p.ucpcSquares[sqDst]
-						if (bCapture && (pcDst&pcOppSide) != 0) || (!bCapture && (pcDst&pcSelfSide) == 0) {
+						if (isCapture && (pcDst&pcOppSide) != 0) || (!isCapture && (pcDst&pcSelfSide) == 0) {
 							mvs[nGenMoves] = move(sqSrc, sqDst)
 							nGenMoves++
 						}
@@ -607,8 +613,8 @@ func (p *PositionStruct) legalMove(mv int) bool {
 	return false
 }
 
-//checked 判断是否被将军
-func (p *PositionStruct) checked() bool {
+//isJiangJun 判断是否被将军
+func (p *PositionStruct) isJiangJun() bool {
 	nDelta, sqDst, pcDst := 0, 0, 0
 	pcSelfSide := sideTag(p.sdPlayer)
 	pcOppSide := oppSideTag(p.sdPlayer)
@@ -680,7 +686,7 @@ func (p *PositionStruct) isMate() bool {
 	nGenMoveNum := p.generateMoves(mvs, false)
 	for i := 0; i < nGenMoveNum; i++ {
 		pcCaptured = p.movePiece(mvs[i])
-		if !p.checked() {
+		if !p.isJiangJun() {
 			p.undoMovePiece(mvs[i], pcCaptured)
 			return false
 		}
@@ -813,9 +819,10 @@ func (p *PositionStruct) searchBook() int {
 	//如果没有找到，那么搜索当前局面的镜像局面
 	if lpbk == bookSize || (lpbk < bookSize && p.search.BookTable[lpbk].dwLock != bkToSearch.dwLock) {
 		bMirror = true
-		posMirror := NewPositionStruct()
+		posMirror := NewPositionStruct(nil)
 		p.mirror(posMirror)
 		bkToSearch.dwLock = posMirror.zobr.dwLock1
+		//Search函数采用二分法搜索找到[0, n)区间内最小的满足f(i)==true的值i
 		lpbk = sort.Search(bookSize, func(i int) bool {
 			return p.search.BookTable[i].dwLock >= bkToSearch.dwLock
 		})
@@ -1042,7 +1049,7 @@ func (p *PositionStruct) searchQuiesc(vlAlpha, vlBeta int) int {
 
 	vlBest := -MateValue
 	//这样可以知道，是否一个走法都没走过(杀棋)
-	if p.inCheck() {
+	if p.inJiangJun() {
 		//如果被将军，则生成全部走法
 		nGenMoves = p.generateMoves(mvs, false)
 		mvs = mvs[:nGenMoves]
@@ -1129,7 +1136,7 @@ func (p *PositionStruct) searchFull(vlAlpha, vlBeta, nDepth int, bNoNull bool) i
 	}
 
 	//尝试空步裁剪(根节点的Beta值是"MateValue"，所以不可能发生空步裁剪)
-	if !bNoNull && !p.inCheck() && p.nullOkay() {
+	if !bNoNull && !p.inJiangJun() && p.nullOkay() {
 		p.nullMove()
 		vl = -p.searchFull(-vlBeta, 1-vlBeta, nDepth-NullDepth-1, true)
 		p.undoNullMove()
@@ -1155,7 +1162,7 @@ func (p *PositionStruct) searchFull(vlAlpha, vlBeta, nDepth int, bNoNull bool) i
 	for mv := p.nextSort(tmpSort); mv != 0; mv = p.nextSort(tmpSort) {
 		if p.makeMove(mv) {
 			//将军延伸
-			if p.inCheck() {
+			if p.inJiangJun() {
 				nNewDepth = nDepth
 			} else {
 				nNewDepth = nDepth - 1
@@ -1220,7 +1227,7 @@ func (p *PositionStruct) searchRoot(nDepth int) int {
 	//逐一走这些走法，并进行递归
 	for mv := p.nextSort(tmpSort); mv != 0; mv = p.nextSort(tmpSort) {
 		if p.makeMove(mv) {
-			if p.inCheck() {
+			if p.inJiangJun() {
 				nNewDepth = nDepth
 			} else {
 				nNewDepth = nDepth - 1
@@ -1310,13 +1317,15 @@ func (p *PositionStruct) searchMain() {
 			break
 		}
 		//超过一秒，就终止搜索
-		if time.Now().Sub(start).Milliseconds() > 1000 {
+
+		if time.Since(start).Microseconds() > 1000 {
 			break
 		}
 	}
 }
 
 //printBoard 打印棋盘
+//touse...
 func (p *PositionStruct) printBoard() {
 	stdString := "\n"
 	for i, v := range p.ucpcSquares {

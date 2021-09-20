@@ -13,6 +13,9 @@ import (
 	"image"
 	"image/color"
 	_ "image/png"
+	"time"
+
+	"github.com/jageros/eventhub"
 
 	"github.com/golang/freetype/truetype"
 	"github.com/hajimehoshi/ebiten/examples/resources/fonts"
@@ -25,16 +28,20 @@ import (
 	"github.com/hajimehoshi/ebiten/audio/wav"
 )
 
+const aiMoveDone = 0
+
+var SubscribeMap map[int]int
+
 //Game 象棋窗口
 type Game struct {
 	sqSelected     int                   //选中的格子
 	mvLast         int                   //上一步棋
-	bFlipped       bool                  //是否翻转棋盘
-	bGameOver      bool                  //是否游戏结束
-	showValue      string                //显示内容
+	isFlipped      bool                  //是否翻转棋盘
+	isGameOver     bool                  //是否游戏结束
+	showMsg        string                //显示内容
 	images         map[int]*ebiten.Image //图片资源
 	audios         map[int]*audio.Player //音效
-	audioContext   *audio.Context        //音效器
+	audioContext   *audio.Context        //音效控制器
 	singlePosition *PositionStruct       //棋局单例
 }
 
@@ -43,11 +50,14 @@ func NewGame() bool {
 	game := &Game{
 		images:         make(map[int]*ebiten.Image),
 		audios:         make(map[int]*audio.Player),
-		singlePosition: NewPositionStruct(),
+		singlePosition: nil,
 	}
-	if game == nil || game.singlePosition == nil {
-		return false
-	}
+	game.singlePosition = NewPositionStruct(game)
+
+	//根本不可能为nil
+	//if game == nil || game.singlePosition == nil {
+	//	return false
+	//}
 
 	var err error
 	//音效器
@@ -79,10 +89,11 @@ func NewGame() bool {
 
 //Update 更新状态，1秒60帧
 func (g *Game) Update(screen *ebiten.Image) error {
+
 	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
-		if g.bGameOver {
-			g.bGameOver = false
-			g.showValue = ""
+		if g.isGameOver {
+			g.isGameOver = false
+			g.showMsg = ""
 			g.sqSelected = 0
 			g.mvLast = 0
 			g.singlePosition.startup()
@@ -93,11 +104,7 @@ func (g *Game) Update(screen *ebiten.Image) error {
 			g.clickSquare(screen, squareXY(x, y))
 		}
 	}
-
 	g.drawBoard(screen)
-	if g.bGameOver {
-		g.messageBox(screen)
-	}
 	return nil
 }
 
@@ -150,7 +157,7 @@ func (g *Game) drawBoard(screen *ebiten.Image) {
 	for x := Left; x <= Right; x++ {
 		for y := Top; y <= Bottom; y++ {
 			xPos, yPos := 0, 0
-			if g.bFlipped {
+			if g.isFlipped {
 				xPos = BoardEdge + (xFlip(x)-Left)*SquareSize
 				yPos = BoardEdge + (yFlip(y)-Top)*SquareSize
 			} else {
@@ -182,17 +189,18 @@ func (g *Game) drawChess(x, y int, screen, img *ebiten.Image) {
 //clickSquare 点击格子处理
 func (g *Game) clickSquare(screen *ebiten.Image, sq int) {
 	pc := 0
-	if g.bFlipped {
+	if g.isFlipped {
 		pc = g.singlePosition.ucpcSquares[squareFlip(sq)]
 	} else {
 		pc = g.singlePosition.ucpcSquares[sq]
 	}
-
+	//要播放的音乐索引
+	var audioClip = -1
 	if (pc & sideTag(g.singlePosition.sdPlayer)) != 0 {
 		//如果点击自己的棋子，那么直接选中
 		g.sqSelected = sq
-		g.playAudio(MusicSelect)
-	} else if g.sqSelected != 0 && !g.bGameOver {
+		audioClip = MusicSelect
+	} else if g.sqSelected != 0 && !g.isGameOver {
 		//如果点击的不是自己的棋子，但有棋子选中了(一定是自己的棋子)，那么走这个棋子
 		mv := move(g.sqSelected, sq)
 		if g.singlePosition.legalMove(mv) {
@@ -201,50 +209,61 @@ func (g *Game) clickSquare(screen *ebiten.Image, sq int) {
 				g.sqSelected = 0
 				//检查重复局面
 				vlRep := g.singlePosition.repStatus(3)
+
 				if g.singlePosition.isMate() {
 					//如果分出胜负，那么播放胜负的声音，并且弹出不带声音的提示框
-					g.playAudio(MusicGameWin)
-					g.showValue = "Your Win!"
-					g.bGameOver = true
+					audioClip = MusicGameWin
+					g.showMsg = "Your Win!"
+					g.isGameOver = true
 				} else if vlRep > 0 {
 					vlRep = g.singlePosition.repValue(vlRep)
 					if vlRep > WinValue {
-						g.playAudio(MusicGameLose)
-						g.showValue = "Your Lose!"
+						audioClip = MusicGameLose
+						g.showMsg = "Your Lose!"
 					} else {
 						if vlRep < -WinValue {
-							g.playAudio(MusicGameWin)
-							g.showValue = "Your Win!"
+							g.showMsg = "Your Win!"
 						} else {
-							g.playAudio(MusicGameWin)
-							g.showValue = "Your Draw!"
+							g.showMsg = "Your Draw!"
 						}
+						audioClip = MusicGameWin
 					}
-					g.bGameOver = true
+					g.isGameOver = true
 				} else if g.singlePosition.nMoveNum > 100 {
-					g.playAudio(MusicGameWin)
-					g.showValue = "Your Draw!"
-					g.bGameOver = true
+					audioClip = MusicGameWin
+					g.showMsg = "Your Draw!"
+					g.isGameOver = true
 				} else {
-					if g.singlePosition.checked() {
-						g.playAudio(MusicJiang)
+					if g.singlePosition.isJiangJun() {
+						audioClip = MusicJiang
 					} else {
 						if g.singlePosition.captured() {
-							g.playAudio(MusicEat)
+							audioClip = MusicEat
 							g.singlePosition.setIrrev()
 						} else {
-							g.playAudio(MusicPut)
+							audioClip = MusicPut
 						}
 					}
-
-					g.aiMove(screen)
+					//启动协程
+					go func() {
+						time.Sleep(time.Duration(float64(time.Second) * 1.5))
+						g.aiMove(screen)
+						eventhub.Publish(aiMoveDone)
+					}()
 				}
 			} else {
-				g.playAudio(MusicJiang) //播放被将军的声音
+				audioClip = MusicJiang //被将军的声音
 			}
+		} else {
+			fmt.Println("错误走法")
 		}
 		//如果根本就不符合走法(例如马不走日字)，那么不做任何处理
 	}
+	if audioClip != -1 {
+		//不等于-1说明有要播放的音乐，此时播放
+		g.playAudio(MusicPut)
+	}
+
 }
 
 //playAudio 播放音效
@@ -257,6 +276,7 @@ func (g *Game) playAudio(value int) {
 
 //aiMove AI移动
 func (g *Game) aiMove(screen *ebiten.Image) {
+
 	//AI走一步棋
 	g.singlePosition.searchMain()
 	g.singlePosition.makeMove(g.singlePosition.search.mvResult)
@@ -264,51 +284,57 @@ func (g *Game) aiMove(screen *ebiten.Image) {
 	g.mvLast = g.singlePosition.search.mvResult
 	//检查重复局面
 	vlRep := g.singlePosition.repStatus(3)
+
+	var audioClip = -1
 	if g.singlePosition.isMate() {
 		//如果分出胜负，那么播放胜负的声音
-		g.playAudio(MusicGameWin)
-		g.showValue = "Your Lose!"
-		g.bGameOver = true
+		audioClip = MusicGameWin
+		g.showMsg = "Your Lose!"
+		g.isGameOver = true
 	} else if vlRep > 0 {
 		vlRep = g.singlePosition.repValue(vlRep)
 		//vlRep是对玩家来说的分值
 		if vlRep < -WinValue {
-			g.playAudio(MusicGameLose)
-			g.showValue = "Your Lose!"
+			audioClip = MusicGameLose
+			g.showMsg = "Your Lose!"
 		} else {
 			if vlRep > WinValue {
-				g.playAudio(MusicGameWin)
-				g.showValue = "Your Lose!"
+				audioClip = MusicGameWin
+				g.showMsg = "Your Lose!"
 			} else {
-				g.playAudio(MusicGameWin)
-				g.showValue = "Your Draw!"
+				audioClip = MusicGameWin
+				g.showMsg = "Your Draw!"
 			}
 		}
-		g.bGameOver = true
+		g.isGameOver = true
 	} else if g.singlePosition.nMoveNum > 100 {
-		g.playAudio(MusicGameWin)
-		g.showValue = "Your Draw!"
-		g.bGameOver = true
+		//超过100步的历史都判人赢了
+		audioClip = MusicGameWin
+		g.showMsg = "Your Draw!"
+		g.isGameOver = true
 	} else {
 		//如果没有分出胜负，那么播放将军、吃子或一般走子的声音
-		if g.singlePosition.inCheck() {
-			g.playAudio(MusicJiang)
+		if g.singlePosition.inJiangJun() {
+			audioClip = MusicJiang
 		} else {
 			if g.singlePosition.captured() {
-				g.playAudio(MusicEat)
+				audioClip = MusicEat
 			} else {
-				g.playAudio(MusicPut)
+				audioClip = MusicPut
 			}
 		}
 		if g.singlePosition.captured() {
 			g.singlePosition.setIrrev()
 		}
 	}
+	if audioClip != -1 {
+		g.playAudio(audioClip)
+	}
 }
 
 //messageBox 提示
 func (g *Game) messageBox(screen *ebiten.Image) {
-	fmt.Println(g.showValue)
+	fmt.Println(g.showMsg)
 	tt, err := truetype.Parse(fonts.ArcadeN_ttf)
 	if err != nil {
 		fmt.Print(err)
@@ -320,6 +346,6 @@ func (g *Game) messageBox(screen *ebiten.Image) {
 		Hinting: font.HintingFull,
 	})
 
-	text.Draw(screen, g.showValue, arcadeFont, 180, 288, color.White)
+	text.Draw(screen, g.showMsg, arcadeFont, 180, 288, color.White)
 	text.Draw(screen, "Click mouse to restart", arcadeFont, 100, 320, color.White)
 }
